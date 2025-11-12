@@ -290,7 +290,21 @@ class HiddenMarkovModel:
         When the logging level is set to DEBUG, the alpha and beta vectors and posterior counts
         are logged.  You can check this against the ice cream spreadsheet."""
 
-        # Forward-backward algorithm.
+        # For fully supervised sentences, just count the observed transitions and emissions directly
+        # (much faster than forward-backward, and gives exact counts instead of expected counts)
+        if all(tag is not None for _, tag in isent):
+            for j in range(1, len(isent)):
+                w_j, t_j = isent[j]
+                _, t_prev = isent[j-1]
+                assert t_j is not None and t_prev is not None  # guaranteed by the if condition
+                # Count the observed transition
+                self.A_counts[t_prev, t_j] += mult
+                # Count the observed emission (but not for BOS/EOS words)
+                if w_j < self.V:
+                    self.B_counts[t_j, w_j] += mult
+            return
+
+        # For unsupervised or partially supervised sentences, use forward-backward algorithm.
         log_Z_forward = self.forward_pass(isent)
         log_Z_backward = self.backward_pass(isent, mult=mult)
         
@@ -406,12 +420,15 @@ class HiddenMarkovModel:
             # Shape: log_beta[j+1] is (k,), log_A is (k,k), log_B_col is (k,)
             # Broadcast: (1,k) + (k,k) + (1,k) -> (k,k) where [s,t] = log_beta[j+1][t] + log_A[s,t] + log_B_col[t]
             log_scores = log_beta[j+1].unsqueeze(0) + log_A + log_B_col.unsqueeze(0)
-            log_beta[j] = torch.logsumexp(log_scores, dim=1)  # sum over t (dim 1)
             
             # Apply constraint if next tag is specified
             if t_next is not None:
-                # Only the specified tag contributes
-                log_beta[j] = log_beta[j+1][t_next] + log_A[:, t_next] + log_B_col[t_next]
+                # Mask out all tags except t_next in the sum
+                mask = torch.full((self.k,), float('-inf'))
+                mask[t_next] = 0.0
+                log_scores = log_scores + mask.unsqueeze(0)  # broadcast to (k, k)
+            
+            log_beta[j] = torch.logsumexp(log_scores, dim=1)  # sum over t (dim 1)
         
         log_Z_backward = log_beta[0][self.bos_t]
         
@@ -490,14 +507,19 @@ class HiddenMarkovModel:
         isent = self._integerize_sentence(sentence, corpus)
 
         # See comments in log_forward on preallocation of alpha.
-        alpha        = [torch.empty(self.k)                  for _ in isent]  
+        log_alpha    = [torch.empty(self.k)                  for _ in isent]  
         backpointers = [torch.empty(self.k, dtype=torch.int) for _ in isent]
         tags: List[int]    # you'll put your integerized tagging here
 
-        # Initialize: BOS_TAG at position 0
-        alpha[0] = self.eye[self.bos_t]
+        # Initialize: BOS_TAG at position 0 (in log-space)
+        log_alpha[0] = torch.full((self.k,), float('-inf'))
+        log_alpha[0][self.bos_t] = 0.0  # log(1) = 0
         
-        # Forward pass: compute max probabilities and backpointers
+        # Precompute log matrices
+        log_A = torch.log(self.A + 1e-45)
+        log_B = torch.log(self.B + 1e-45)
+        
+        # Forward pass: compute max log-probabilities and backpointers
         for j in range(1, len(isent)):
             w_j, t_j = isent[j]
             
@@ -505,23 +527,26 @@ class HiddenMarkovModel:
             for t in range(self.k):
                 # Skip if this tag is not allowed (if t_j is specified)
                 if t_j is not None and t != t_j:
-                    alpha[j][t] = 0
+                    log_alpha[j][t] = float('-inf')
                     backpointers[j][t] = -1
                     continue
                 
-                # Compute max over previous tags: max_s (alpha[j-1][s] * A[s,t] * B[t,w_j])
+                # Compute max over previous tags: max_s (log_alpha[j-1][s] + log_A[s,t] + log_B[t,w_j])
                 # For EOS/BOS, handle emission properly
                 if w_j < self.V:  # regular word
-                    emissions = self.B[t, w_j]
+                    log_emissions = log_B[t, w_j]
                 else:  # EOS_WORD or BOS_WORD
-                    emissions = 1.0 if (t == self.eos_t and w_j == self.vocab.index(EOS_WORD)) or \
-                                       (t == self.bos_t and w_j == self.vocab.index(BOS_WORD)) else 0.0
+                    if (t == self.eos_t and w_j == self.vocab.index(EOS_WORD)) or \
+                       (t == self.bos_t and w_j == self.vocab.index(BOS_WORD)):
+                        log_emissions = 0.0  # log(1) = 0
+                    else:
+                        log_emissions = float('-inf')  # log(0) = -inf
                 
-                # Compute scores for all previous tags
-                scores = alpha[j-1] * self.A[:, t] * emissions
+                # Compute log-scores for all previous tags
+                log_scores = log_alpha[j-1] + log_A[:, t] + log_emissions
                 
                 # Find the max and argmax
-                alpha[j][t], backpointers[j][t] = scores.max(dim=0)
+                log_alpha[j][t], backpointers[j][t] = log_scores.max(dim=0)
         
         # Backward pass: follow backpointers to get the best tag sequence
         tags = [0] * len(isent)
@@ -532,6 +557,10 @@ class HiddenMarkovModel:
         # Follow backpointers backward
         for j in range(len(isent) - 1, 0, -1):
             tags[j-1] = backpointers[j][tags[j]].item()
+        
+        # DEBUG: Check what tags were chosen
+        if len(isent) <= 10:
+            log.debug(f"Viterbi tags: {[self.tagset[t] for t in tags]}")
 
         # Make a new tagged sentence with the old words and the chosen tags
         # (using self.tagset to deintegerize the chosen tags).
