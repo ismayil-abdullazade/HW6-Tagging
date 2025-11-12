@@ -149,8 +149,9 @@ class HiddenMarkovModel:
                 'from EOS and BOS are not all zero, meaning you\'ve accumulated them incorrectly!'
 
         # Update emission probabilities (self.B).
-        self.B_counts += λ          # smooth the counts (EOS_WORD and BOS_WORD remain at 0 since they're not in the matrix)
-        self.B = self.B_counts / self.B_counts.sum(dim=1, keepdim=True)  # normalize into prob distributions
+        # IMPORTANT: Don't modify B_counts in-place! Make a copy for smoothing
+        smoothed_B_counts = self.B_counts + λ  # smooth the counts
+        self.B = smoothed_B_counts / smoothed_B_counts.sum(dim=1, keepdim=True)  # normalize into prob distributions
         self.B[self.eos_t, :] = 0   # replace these nan values with structural zeroes, just as in init_params
         self.B[self.bos_t, :] = 0
 
@@ -169,15 +170,16 @@ class HiddenMarkovModel:
             # For unigram model, sum all transition counts to get unigram tag counts
             # Then create a matrix where each row is the same unigram distribution
             tag_counts = self.A_counts.sum(dim=0, keepdim=True)  # sum over all previous tags
-            tag_counts += λ  # smooth
-            tag_counts[:, self.bos_t] = 0  # structural zero
-            unigram_probs = tag_counts / tag_counts.sum(dim=1, keepdim=True)
+            smoothed_tag_counts = tag_counts + λ  # smooth (don't modify in-place)
+            smoothed_tag_counts[:, self.bos_t] = 0  # structural zero
+            unigram_probs = smoothed_tag_counts / smoothed_tag_counts.sum(dim=1, keepdim=True)
             self.A = unigram_probs.repeat(self.k, 1)  # repeat for all rows
         else:
             # For bigram model, normalize each row
-            self.A_counts += λ  # smooth
-            self.A_counts[:, self.bos_t] = 0  # structural zero: can't transition to BOS
-            self.A = self.A_counts / self.A_counts.sum(dim=1, keepdim=True)
+            # IMPORTANT: Don't modify A_counts in-place! Make a copy for smoothing
+            smoothed_A_counts = self.A_counts + λ  # smooth
+            smoothed_A_counts[:, self.bos_t] = 0  # structural zero: can't transition to BOS
+            self.A = smoothed_A_counts / smoothed_A_counts.sum(dim=1, keepdim=True)
             self.A[self.eos_t, :] = 0  # structural zero: EOS can't transition anywhere (nan -> 0)
 
     def _zero_counts(self):
@@ -288,7 +290,21 @@ class HiddenMarkovModel:
         When the logging level is set to DEBUG, the alpha and beta vectors and posterior counts
         are logged.  You can check this against the ice cream spreadsheet."""
 
-        # Forward-backward algorithm.
+        # For fully supervised sentences, just count the observed transitions and emissions directly
+        # (much faster than forward-backward, and gives exact counts instead of expected counts)
+        if all(tag is not None for _, tag in isent):
+            for j in range(1, len(isent)):
+                w_j, t_j = isent[j]
+                _, t_prev = isent[j-1]
+                assert t_j is not None and t_prev is not None  # guaranteed by the if condition
+                # Count the observed transition
+                self.A_counts[t_prev, t_j] += mult
+                # Count the observed emission (but not for BOS/EOS words)
+                if w_j < self.V:
+                    self.B_counts[t_j, w_j] += mult
+            return
+
+        # For unsupervised or partially supervised sentences, use forward-backward algorithm.
         log_Z_forward = self.forward_pass(isent)
         log_Z_backward = self.backward_pass(isent, mult=mult)
         
@@ -327,7 +343,7 @@ class HiddenMarkovModel:
         log_A = torch.log(self.A + 1e-45)
         log_B = torch.log(self.B + 1e-45)
         
-        # Forward pass
+        # Forward pass - VECTORIZED VERSION
         for j in range(1, len(isent)):
             w_j, t_j = isent[j]
             
@@ -341,18 +357,20 @@ class HiddenMarkovModel:
                 elif w_j == self.vocab.index(BOS_WORD):
                     log_B_col[self.bos_t] = 0.0
             
-            # Compute log_alpha[j] for each tag t
-            for t in range(self.k):
-                # If t_j is specified and t != t_j, skip (probability 0)
-                if t_j is not None and t != t_j:
-                    log_alpha[j][t] = float('-inf')
-                    continue
-                
-                # log_alpha[j][t] = log(sum_s alpha[j-1][s] * A[s,t] * B[t,w_j])
-                # = log(sum_s exp(log_alpha[j-1][s] + log A[s,t] + log B[t,w_j]))
-                # Use logsumexp for numerical stability
-                log_scores = log_alpha[j-1] + log_A[:, t] + log_B_col[t]
-                log_alpha[j][t] = torch.logsumexp(log_scores, dim=0)
+            # Vectorized computation for ALL tags at once
+            # log_alpha[j][t] = log(sum_s exp(log_alpha[j-1][s] + log_A[s,t] + log_B[t,w_j]))
+            # Shape: log_alpha[j-1] is (k,), log_A is (k,k), log_B_col is (k,)
+            # We want: for each t, sum over s of exp(log_alpha[j-1][s] + log_A[s,t] + log_B_col[t])
+            
+            # Broadcast: (k,1) + (k,k) + (1,k) -> (k,k) matrix where [s,t] = log_alpha[j-1][s] + log_A[s,t] + log_B_col[t]
+            log_scores = log_alpha[j-1].unsqueeze(1) + log_A + log_B_col.unsqueeze(0)
+            log_alpha[j] = torch.logsumexp(log_scores, dim=0)  # sum over s (dim 0)
+            
+            # Apply constraint if tag is specified
+            if t_j is not None:
+                mask = torch.full((self.k,), float('-inf'))
+                mask[t_j] = 0.0
+                log_alpha[j] = log_alpha[j] + mask
         
         # Store for backward pass (keep in log space)
         self.log_alpha = log_alpha
@@ -384,7 +402,7 @@ class HiddenMarkovModel:
         log_A = torch.log(self.A + 1e-45)
         log_B = torch.log(self.B + 1e-45)
         
-        # Backward pass to compute beta values
+        # Backward pass to compute beta values - VECTORIZED VERSION
         for j in range(len(isent) - 2, -1, -1):  # from n down to 0
             w_next, t_next = isent[j+1]
             
@@ -398,22 +416,23 @@ class HiddenMarkovModel:
                 elif w_next == self.vocab.index(BOS_WORD):
                     log_B_col[self.bos_t] = 0.0
             
-            # Compute log_beta[j] for each tag s
-            for s in range(self.k):
-                # log_beta[j][s] = log(sum_t beta[j+1][t] * A[s,t] * B[t,w_{j+1}])
-                # Filter for allowed next tags
-                allowed_mask = torch.ones(self.k, dtype=torch.bool)
-                if t_next is not None:
-                    allowed_mask = torch.zeros(self.k, dtype=torch.bool)
-                    allowed_mask[t_next] = True
-                
-                log_scores = log_beta[j+1] + log_A[s, :] + log_B_col
-                log_scores = torch.where(allowed_mask, log_scores, torch.tensor(float('-inf')))
-                log_beta[j][s] = torch.logsumexp(log_scores, dim=0)
+            # Vectorized: log_beta[j][s] = log(sum_t exp(log_beta[j+1][t] + log_A[s,t] + log_B_col[t]))
+            # Shape: log_beta[j+1] is (k,), log_A is (k,k), log_B_col is (k,)
+            # Broadcast: (1,k) + (k,k) + (1,k) -> (k,k) where [s,t] = log_beta[j+1][t] + log_A[s,t] + log_B_col[t]
+            log_scores = log_beta[j+1].unsqueeze(0) + log_A + log_B_col.unsqueeze(0)
+            
+            # Apply constraint if next tag is specified
+            if t_next is not None:
+                # Mask out all tags except t_next in the sum
+                mask = torch.full((self.k,), float('-inf'))
+                mask[t_next] = 0.0
+                log_scores = log_scores + mask.unsqueeze(0)  # broadcast to (k, k)
+            
+            log_beta[j] = torch.logsumexp(log_scores, dim=1)  # sum over t (dim 1)
         
         log_Z_backward = log_beta[0][self.bos_t]
         
-        # Now accumulate expected counts using log_alpha and log_beta
+        # Now accumulate expected counts using log_alpha and log_beta - VECTORIZED VERSION
         # All computation in log-space for numerical stability
         for j in range(1, len(isent)):
             w_j, t_j = isent[j]
@@ -428,40 +447,44 @@ class HiddenMarkovModel:
                 elif w_j == self.vocab.index(BOS_WORD):
                     log_B_col[self.bos_t] = 0.0
             
-            # Accumulate transition counts
-            for s in range(self.k):
-                # Skip if s is EOS (EOS can't transition to anything)
-                if s == self.eos_t:
-                    continue
-                    
-                for t in range(self.k):
-                    # Skip if constrained or structural zero
-                    if t_j is not None and t != t_j:
-                        continue
-                    if t == self.bos_t:
-                        continue
-                    
-                    # P(s at j-1, t at j | sentence) = exp(log_alpha[j-1][s] + log A[s,t] + log B[t,w_j] + log_beta[j][t] - log Z)
-                    log_posterior = (self.log_alpha[j-1][s] + log_A[s, t] + 
-                                   log_B_col[t] + log_beta[j][t] - self.log_Z)
-                    
-                    # Avoid underflow: only add if log_posterior is not too negative
-                    if log_posterior > -100:  # exp(-100) is essentially 0
-                        posterior = torch.exp(log_posterior)
-                        self.A_counts[s, t] += mult * posterior
+            # Vectorized transition count accumulation
+            # P(s at j-1, t at j | sentence) = exp(log_alpha[j-1][s] + log_A[s,t] + log_B[t,w_j] + log_beta[j][t] - log_Z)
+            # Shape: (k,1) + (k,k) + (1,k) + (1,k) - scalar = (k,k) matrix
+            log_posteriors = (self.log_alpha[j-1].unsqueeze(1) + log_A + 
+                            log_B_col.unsqueeze(0) + log_beta[j].unsqueeze(0) - self.log_Z)
             
-            # Accumulate emission counts
+            # Apply constraints
+            # Mask out transitions TO BOS (column 0)
+            log_posteriors[:, self.bos_t] = float('-inf')
+            # Mask out transitions FROM EOS (row corresponding to EOS)
+            log_posteriors[self.eos_t, :] = float('-inf')
+            # If tag is specified, mask out all except that tag
+            if t_j is not None:
+                mask = torch.full_like(log_posteriors, float('-inf'))
+                mask[:, t_j] = 0.0
+                log_posteriors = log_posteriors + mask
+            
+            # Only accumulate where log_posterior > threshold
+            posteriors = torch.where(log_posteriors > -100, 
+                                    torch.exp(log_posteriors), 
+                                    torch.tensor(0.0))
+            self.A_counts += mult * posteriors
+            
+            # Vectorized emission count accumulation
             if w_j < self.V:
-                for t in range(self.k):
-                    if t_j is not None and t != t_j:
-                        continue
-                    
-                    # P(t at j | sentence) = exp(log_alpha[j][t] + log_beta[j][t] - log Z)
-                    log_posterior = self.log_alpha[j][t] + log_beta[j][t] - self.log_Z
-                    
-                    if log_posterior > -100:
-                        posterior = torch.exp(log_posterior)
-                        self.B_counts[t, w_j] += mult * posterior
+                # P(t at j | sentence) = exp(log_alpha[j][t] + log_beta[j][t] - log_Z)
+                log_posteriors_emit = self.log_alpha[j] + log_beta[j] - self.log_Z
+                
+                # Apply tag constraint if specified
+                if t_j is not None:
+                    mask = torch.full_like(log_posteriors_emit, float('-inf'))
+                    mask[t_j] = 0.0
+                    log_posteriors_emit = log_posteriors_emit + mask
+                
+                posteriors_emit = torch.where(log_posteriors_emit > -100,
+                                            torch.exp(log_posteriors_emit),
+                                            torch.tensor(0.0))
+                self.B_counts[:, w_j] += mult * posteriors_emit
         
         return log_Z_backward
 
@@ -484,14 +507,19 @@ class HiddenMarkovModel:
         isent = self._integerize_sentence(sentence, corpus)
 
         # See comments in log_forward on preallocation of alpha.
-        alpha        = [torch.empty(self.k)                  for _ in isent]  
+        log_alpha    = [torch.empty(self.k)                  for _ in isent]  
         backpointers = [torch.empty(self.k, dtype=torch.int) for _ in isent]
         tags: List[int]    # you'll put your integerized tagging here
 
-        # Initialize: BOS_TAG at position 0
-        alpha[0] = self.eye[self.bos_t]
+        # Initialize: BOS_TAG at position 0 (in log-space)
+        log_alpha[0] = torch.full((self.k,), float('-inf'))
+        log_alpha[0][self.bos_t] = 0.0  # log(1) = 0
         
-        # Forward pass: compute max probabilities and backpointers
+        # Precompute log matrices
+        log_A = torch.log(self.A + 1e-45)
+        log_B = torch.log(self.B + 1e-45)
+        
+        # Forward pass: compute max log-probabilities and backpointers
         for j in range(1, len(isent)):
             w_j, t_j = isent[j]
             
@@ -499,23 +527,26 @@ class HiddenMarkovModel:
             for t in range(self.k):
                 # Skip if this tag is not allowed (if t_j is specified)
                 if t_j is not None and t != t_j:
-                    alpha[j][t] = 0
+                    log_alpha[j][t] = float('-inf')
                     backpointers[j][t] = -1
                     continue
                 
-                # Compute max over previous tags: max_s (alpha[j-1][s] * A[s,t] * B[t,w_j])
+                # Compute max over previous tags: max_s (log_alpha[j-1][s] + log_A[s,t] + log_B[t,w_j])
                 # For EOS/BOS, handle emission properly
                 if w_j < self.V:  # regular word
-                    emissions = self.B[t, w_j]
+                    log_emissions = log_B[t, w_j]
                 else:  # EOS_WORD or BOS_WORD
-                    emissions = 1.0 if (t == self.eos_t and w_j == self.vocab.index(EOS_WORD)) or \
-                                       (t == self.bos_t and w_j == self.vocab.index(BOS_WORD)) else 0.0
+                    if (t == self.eos_t and w_j == self.vocab.index(EOS_WORD)) or \
+                       (t == self.bos_t and w_j == self.vocab.index(BOS_WORD)):
+                        log_emissions = 0.0  # log(1) = 0
+                    else:
+                        log_emissions = float('-inf')  # log(0) = -inf
                 
-                # Compute scores for all previous tags
-                scores = alpha[j-1] * self.A[:, t] * emissions
+                # Compute log-scores for all previous tags
+                log_scores = log_alpha[j-1] + log_A[:, t] + log_emissions
                 
                 # Find the max and argmax
-                alpha[j][t], backpointers[j][t] = scores.max(dim=0)
+                log_alpha[j][t], backpointers[j][t] = log_scores.max(dim=0)
         
         # Backward pass: follow backpointers to get the best tag sequence
         tags = [0] * len(isent)
@@ -526,6 +557,10 @@ class HiddenMarkovModel:
         # Follow backpointers backward
         for j in range(len(isent) - 1, 0, -1):
             tags[j-1] = backpointers[j][tags[j]].item()
+        
+        # DEBUG: Check what tags were chosen
+        if len(isent) <= 10:
+            log.debug(f"Viterbi tags: {[self.tagset[t] for t in tags]}")
 
         # Make a new tagged sentence with the old words and the chosen tags
         # (using self.tagset to deintegerize the chosen tags).
