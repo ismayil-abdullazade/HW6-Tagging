@@ -477,6 +477,11 @@ class HiddenMarkovModel:
                 # P(t at j | sentence) = exp(log_alpha[j][t] + log_beta[j][t] - log_Z)
                 log_posteriors_emit = self.log_alpha[j] + log_beta[j] - self.log_Z
                 
+                # NEVER accumulate emission counts from EOS_TAG or BOS_TAG
+                # These tags only emit their special words (EOS_WORD, BOS_WORD) structurally
+                log_posteriors_emit[self.eos_t] = float('-inf')
+                log_posteriors_emit[self.bos_t] = float('-inf')
+                
                 # Apply tag constraint if specified
                 if t_j is not None:
                     mask = torch.full_like(log_posteriors_emit, float('-inf'))
