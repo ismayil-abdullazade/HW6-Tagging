@@ -22,6 +22,12 @@ def viterbi_tagger(model: HiddenMarkovModel, eval_corpus: TaggedCorpus) -> Calla
         return model.viterbi_tagging(input, eval_corpus)
     return tagger
 
+def posterior_tagger(model: HiddenMarkovModel, eval_corpus: TaggedCorpus) -> Callable[[Sentence], Sentence]:
+    """Tagger that uses posterior decoding: independently pick the most likely tag at each position."""
+    def tagger(input: Sentence) -> Sentence:
+        return model.posterior_tagging(input, eval_corpus)
+    return tagger
+
 def model_cross_entropy(model: HiddenMarkovModel,
                         eval_corpus: TaggedCorpus) -> float:
     """Return cross-entropy per token of the model on the given evaluation corpus.
@@ -39,14 +45,21 @@ def model_cross_entropy(model: HiddenMarkovModel,
 def viterbi_error_rate(model: HiddenMarkovModel,
                      eval_corpus: TaggedCorpus,
                      known_vocab: Optional[Integerizer[Word]] = None,
-                     show_cross_entropy = True) -> float:
-    """Return the error rate of Viterbi tagging with the given model on the given 
+                     show_cross_entropy = True,
+                     use_posterior = False) -> float:
+    """Return the error rate of Viterbi (or posterior) tagging with the given model on the given 
     evaluation corpus, after logging cross-entropy (optionally) and a breakdown 
     of accuracy."""
 
     if show_cross_entropy:
         model_cross_entropy(model, eval_corpus)  # call this for its side effect (logging)
-    return tagger_error_rate(viterbi_tagger(model, eval_corpus),
+    
+    if use_posterior:
+        tagger = posterior_tagger(model, eval_corpus)
+    else:
+        tagger = viterbi_tagger(model, eval_corpus)
+    
+    return tagger_error_rate(tagger,
                              eval_corpus,
                              known_vocab=known_vocab)
 
@@ -105,9 +118,10 @@ def eval_tagging(predicted: Sentence,
 
 def write_tagging(model_or_tagger: Union[HiddenMarkovModel, Callable[[Sentence], Sentence]],
                         eval_corpus: TaggedCorpus,
-                        output_path: Path) -> None:
+                        output_path: Path,
+                        use_posterior: bool = False) -> None:
     if isinstance(model_or_tagger, HiddenMarkovModel):
-        tagger = viterbi_tagger(model_or_tagger, eval_corpus)
+        tagger = posterior_tagger(model_or_tagger, eval_corpus) if use_posterior else viterbi_tagger(model_or_tagger, eval_corpus)
     else:
         tagger = model_or_tagger
     with open(output_path, 'w') as f:

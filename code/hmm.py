@@ -173,14 +173,20 @@ class HiddenMarkovModel:
             # Then create a matrix where each row is the same unigram distribution
             tag_counts = self.A_counts.sum(dim=0, keepdim=True)  # sum over all previous tags
             smoothed_tag_counts = tag_counts + λ  # smooth (don't modify in-place)
-            smoothed_tag_counts[:, self.bos_t] = 0  # structural zero
+            smoothed_tag_counts[:, self.bos_t] = 0  # structural zero: can't transition to BOS
+            smoothed_tag_counts[:, self.eos_t] = 0  # structural zero: BOS can't transition to EOS
             unigram_probs = smoothed_tag_counts / smoothed_tag_counts.sum(dim=1, keepdim=True)
             self.A = unigram_probs.repeat(self.k, 1)  # repeat for all rows
+            # Fix structural zeros after normalization
+            self.A[:, self.bos_t] = 0  # can't transition to BOS
+            self.A[self.bos_t, self.eos_t] = 0  # BOS can't transition to EOS
+            self.A[self.eos_t, :] = 0  # EOS can't transition anywhere
         else:
             # For bigram model, normalize each row
             # IMPORTANT: Don't modify A_counts in-place! Make a copy for smoothing
             smoothed_A_counts = self.A_counts + λ  # smooth
             smoothed_A_counts[:, self.bos_t] = 0  # structural zero: can't transition to BOS
+            smoothed_A_counts[self.bos_t, self.eos_t] = 0  # structural zero: BOS can't transition to EOS
             self.A = smoothed_A_counts / smoothed_A_counts.sum(dim=1, keepdim=True)
             self.A[self.eos_t, :] = 0  # structural zero: EOS can't transition anywhere (nan -> 0)
 
@@ -571,6 +577,88 @@ class HiddenMarkovModel:
 
         # Make a new tagged sentence with the old words and the chosen tags
         # (using self.tagset to deintegerize the chosen tags).
+        return Sentence([(word, self.tagset[tags[j]]) for j, (word, tag) in enumerate(sentence)])
+
+    def posterior_tagging(self, sentence: Sentence, corpus: TaggedCorpus) -> Sentence:
+        """Find the tagging that maximizes the expected number of correct tags,
+        by independently choosing the most likely tag at each position (posterior decoding).
+        
+        This is different from Viterbi, which finds the most likely complete sequence.
+        Posterior decoding can produce sequences that have zero probability, but it
+        minimizes the expected number of tagging errors (Minimum Bayes Risk decoding).
+        """
+        
+        isent = self._integerize_sentence(sentence, corpus)
+        
+        # Run forward-backward to get alpha and beta
+        log_Z = self.forward_pass(isent)
+        
+        # We need beta values too (but we don't need the counts it accumulates)
+        # Store the current counts, run backward, then restore
+        old_A_counts = getattr(self, 'A_counts', None)
+        old_B_counts = getattr(self, 'B_counts', None)
+        self._zero_counts()  # Create fresh count tensors
+        
+        # Compute beta values (backward pass will store them in self, similar to alpha)
+        beta = [torch.empty(self.k) for _ in isent]
+        beta[-1] = self.eye[self.eos_t]
+        log_beta = [torch.empty(self.k) for _ in isent]
+        log_beta[-1] = torch.log(beta[-1] + 1e-45)
+        
+        log_A = torch.log(self.A + 1e-45)
+        log_B = torch.log(self.B + 1e-45)
+        
+        # Backward pass to compute beta values only (no count accumulation needed)
+        for j in range(len(isent) - 2, -1, -1):
+            w_next, t_next = isent[j+1]
+            
+            if w_next < self.V:
+                log_B_col = log_B[:, w_next]
+            else:
+                log_B_col = torch.full((self.k,), float('-inf'))
+                if w_next == self.vocab.index(EOS_WORD):
+                    log_B_col[self.eos_t] = 0.0
+                elif w_next == self.vocab.index(BOS_WORD):
+                    log_B_col[self.bos_t] = 0.0
+            
+            log_scores = log_beta[j+1].unsqueeze(0) + log_A + log_B_col.unsqueeze(0)
+            
+            if t_next is not None:
+                mask = torch.full((self.k,), float('-inf'))
+                mask[t_next] = 0.0
+                log_scores = log_scores + mask.unsqueeze(0)
+            
+            log_beta[j] = torch.logsumexp(log_scores, dim=1)
+        
+        # Restore old counts (if they existed)
+        if old_A_counts is not None:
+            self.A_counts = old_A_counts
+        if old_B_counts is not None:
+            self.B_counts = old_B_counts
+        
+        # Now compute posterior marginals and pick best tag at each position
+        tags: List[int] = []
+        
+        for j in range(len(isent)):
+            w_j, t_j = isent[j]
+            
+            # Posterior marginal: p(t_j | sentence) ∝ alpha[j][t] * beta[j][t]
+            # In log space: log p(t_j | sentence) = log_alpha[j][t] + log_beta[j][t] - log_Z
+            log_posteriors = self.log_alpha[j] + log_beta[j] - log_Z
+            
+            # If tag is constrained, respect that
+            if t_j is not None:
+                tags.append(t_j)
+            else:
+                # Pick the tag with highest posterior probability
+                best_tag = log_posteriors.argmax().item()
+                tags.append(best_tag)
+        
+        # DEBUG: Check what tags were chosen
+        if len(isent) <= 10:
+            logger.debug(f"Posterior tags: {[self.tagset[t] for t in tags]}")
+        
+        # Make a new tagged sentence with the old words and the chosen tags
         return Sentence([(word, self.tagset[tags[j]]) for j, (word, tag) in enumerate(sentence)])
 
     def save(self, path: Path|str, checkpoint=None, checkpoint_interval: int = 300) -> None:

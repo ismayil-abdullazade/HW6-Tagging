@@ -133,6 +133,13 @@ def parse_args() -> argparse.Namespace:
         help="model should use extra improvements"
     )
 
+    modelgroup.add_argument(
+        "--no-oov",
+        action="store_true",
+        default=False,
+        help="do not add OOV token to vocabulary (for ice cream dataset)"
+    )
+
     #####
     # top-level options
     #####
@@ -312,7 +319,7 @@ def main() -> None:
     else:
         # Build a new model of the required class from scratch, building vocab/tagset from training corpus.
         assert new_model_class is not None
-        train_corpus = TaggedCorpus(*train_paths)
+        train_corpus = TaggedCorpus(*train_paths, add_oov=not args.no_oov)
         if not getattr(new_model_class, 'neural', False):
             # simple non-neural model
             model = new_model_class(train_corpus.tagset, train_corpus.vocab, 
@@ -348,7 +355,8 @@ def main() -> None:
     # This will be monitored throughout training and used for early stopping.
     loss = lambda x: model_cross_entropy(x, eval_corpus)
     other_loss = lambda x: viterbi_error_rate(x, eval_corpus, show_cross_entropy=False,
-                                              known_vocab=known_vocab or train_corpus.vocab)  # training words only
+                                              known_vocab=known_vocab or train_corpus.vocab,
+                                              use_posterior=args.awesome)  # training words only
     if args.loss == 'cross_entropy': 
         pass
     elif args.loss == 'viterbi_error':   # only makes sense if eval_corpus is supervised
@@ -393,7 +401,7 @@ def main() -> None:
     with torch.inference_mode():   # turn off all gradient tracking
         # Run the model on the input data (eval corpus).
         if args.output_file:
-            write_tagging(model, eval_corpus, Path(args.output_file))
+            write_tagging(model, eval_corpus, Path(args.output_file), use_posterior=args.awesome)
             eval_log.info(f"Wrote tagging to {args.output_file}")
 
         # Show how well we did on the input data.  
