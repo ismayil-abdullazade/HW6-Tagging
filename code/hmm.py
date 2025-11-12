@@ -145,8 +145,10 @@ class HiddenMarkovModel:
         We respect structural zeroes ("don't guess when you know")."""
 
         # we should have seen no emissions from BOS or EOS tags
-        assert self.B_counts[self.eos_t:self.bos_t, :].any() == 0, 'Your expected emission counts ' \
-                'from EOS and BOS are not all zero, meaning you\'ve accumulated them incorrectly!'
+        assert self.B_counts[self.eos_t, :].sum() == 0, 'Your expected emission counts ' \
+                'from EOS are not all zero, meaning you\'ve accumulated them incorrectly!'
+        assert self.B_counts[self.bos_t, :].sum() == 0, 'Your expected emission counts ' \
+                'from BOS are not all zero, meaning you\'ve accumulated them incorrectly!'
 
         # Update emission probabilities (self.B).
         # IMPORTANT: Don't modify B_counts in-place! Make a copy for smoothing
@@ -155,10 +157,10 @@ class HiddenMarkovModel:
         self.B[self.eos_t, :] = 0   # replace these nan values with structural zeroes, just as in init_params
         self.B[self.bos_t, :] = 0
 
-        # we should have seen no "tag -> BOS" or "BOS -> tag" transitions
-        assert self.A_counts[:, self.bos_t].any() == 0, 'Your expected transition counts ' \
+        # we should have seen no "tag -> BOS" or "EOS -> tag" transitions
+        assert self.A_counts[:, self.bos_t].sum() == 0, 'Your expected transition counts ' \
                 'to BOS are not all zero, meaning you\'ve accumulated them incorrectly!'
-        assert self.A_counts[self.eos_t, :].any() == 0, 'Your expected transition counts ' \
+        assert self.A_counts[self.eos_t, :].sum() == 0, 'Your expected transition counts ' \
                 'from EOS are not all zero, meaning you\'ve accumulated them incorrectly!'
                 
         # Update transition probabilities (self.A).  
