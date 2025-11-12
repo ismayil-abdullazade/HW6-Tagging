@@ -149,8 +149,9 @@ class HiddenMarkovModel:
                 'from EOS and BOS are not all zero, meaning you\'ve accumulated them incorrectly!'
 
         # Update emission probabilities (self.B).
-        self.B_counts += λ          # smooth the counts (EOS_WORD and BOS_WORD remain at 0 since they're not in the matrix)
-        self.B = self.B_counts / self.B_counts.sum(dim=1, keepdim=True)  # normalize into prob distributions
+        # IMPORTANT: Don't modify B_counts in-place! Make a copy for smoothing
+        smoothed_B_counts = self.B_counts + λ  # smooth the counts
+        self.B = smoothed_B_counts / smoothed_B_counts.sum(dim=1, keepdim=True)  # normalize into prob distributions
         self.B[self.eos_t, :] = 0   # replace these nan values with structural zeroes, just as in init_params
         self.B[self.bos_t, :] = 0
 
@@ -169,15 +170,16 @@ class HiddenMarkovModel:
             # For unigram model, sum all transition counts to get unigram tag counts
             # Then create a matrix where each row is the same unigram distribution
             tag_counts = self.A_counts.sum(dim=0, keepdim=True)  # sum over all previous tags
-            tag_counts += λ  # smooth
-            tag_counts[:, self.bos_t] = 0  # structural zero
-            unigram_probs = tag_counts / tag_counts.sum(dim=1, keepdim=True)
+            smoothed_tag_counts = tag_counts + λ  # smooth (don't modify in-place)
+            smoothed_tag_counts[:, self.bos_t] = 0  # structural zero
+            unigram_probs = smoothed_tag_counts / smoothed_tag_counts.sum(dim=1, keepdim=True)
             self.A = unigram_probs.repeat(self.k, 1)  # repeat for all rows
         else:
             # For bigram model, normalize each row
-            self.A_counts += λ  # smooth
-            self.A_counts[:, self.bos_t] = 0  # structural zero: can't transition to BOS
-            self.A = self.A_counts / self.A_counts.sum(dim=1, keepdim=True)
+            # IMPORTANT: Don't modify A_counts in-place! Make a copy for smoothing
+            smoothed_A_counts = self.A_counts + λ  # smooth
+            smoothed_A_counts[:, self.bos_t] = 0  # structural zero: can't transition to BOS
+            self.A = smoothed_A_counts / smoothed_A_counts.sum(dim=1, keepdim=True)
             self.A[self.eos_t, :] = 0  # structural zero: EOS can't transition anywhere (nan -> 0)
 
     def _zero_counts(self):
