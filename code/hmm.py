@@ -560,7 +560,7 @@ class HiddenMarkovModel:
         
         # DEBUG: Check what tags were chosen
         if len(isent) <= 10:
-            log.debug(f"Viterbi tags: {[self.tagset[t] for t in tags]}")
+            logger.debug(f"Viterbi tags: {[self.tagset[t] for t in tags]}")
 
         # Make a new tagged sentence with the old words and the chosen tags
         # (using self.tagset to deintegerize the chosen tags).
