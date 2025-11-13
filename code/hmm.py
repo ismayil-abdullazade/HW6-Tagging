@@ -712,7 +712,8 @@ class HiddenMarkovModel:
             
         # torch.load is similar to pickle.load but handles tensors too
         # map_location allows loading tensors on different device than saved
-        model = torch.load(path, map_location=device)
+        # weights_only=False is needed for models with custom classes (PyTorch 2.6+ compatibility)
+        model = torch.load(path, map_location=device, weights_only=False)
 
         if not isinstance(model, cls):
             raise ValueError(f"Type Error: expected object of type {cls.__name__} but got {model.__class__.__name__} " \
