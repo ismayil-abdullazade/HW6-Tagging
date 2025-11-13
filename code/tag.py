@@ -43,8 +43,8 @@ def parse_args() -> argparse.Namespace:
         "-t",
         "--train",
         type=str,
-        nargs="+",
-        help="training data files to train the model further"
+        action="append",
+        help="training data files to train the model further (can be used multiple times)"
     )
 
     filegroup.add_argument(
