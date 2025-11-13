@@ -41,10 +41,13 @@ def train_model(output_path, train_files, device='cpu', load_from=None):
     
     if load_from:
         # Staged training: load existing model and continue training
-        cmd.extend(['--load', load_from])
+        cmd.extend(['-c', load_from])
     
-    for train_file in train_files:
-        cmd.extend(['-t', train_file])
+    # Use single -t flag with all files (compatible with nargs="+")
+    # This works with the original argparse configuration
+    if train_files:
+        cmd.append('-t')
+        cmd.extend(train_files)
     
     cmd.extend(['-m', output_path, '--device', device])
     
@@ -260,14 +263,21 @@ def main():
     print("STRATEGY 8: Unsupervised Only (Comparison)")
     print("="*80)
     print("Training on enraw alone (no supervision)")
+    print()
+    print("⚠️  SKIPPING: Cannot train on enraw alone because:")
+    print("   - enraw has no tags (unsupervised)")
+    print("   - Model would only learn BOS/EOS tags")
+    print("   - Cannot evaluate on endev which has 26 tags")
+    print("   - This experiment is not meaningful for accuracy evaluation")
+    print()
     
-    model_path = 'en_hmm_unsup_only.pkl'
-    train_model(model_path, ['data/enraw'], device=device)
-    
-    acc, ce = evaluate_model(model_path, 'data/endev', 'Unsupervised Only')
-    if acc is not None:
-        results['unsupervised_only'] = {'accuracy': acc, 'cross_entropy': ce,
-                                        'description': 'enraw only (no labels)'}
+    # Skip this experiment - it's not meaningful
+    # model_path = 'en_hmm_unsup_only.pkl'
+    # train_model(model_path, ['data/enraw'], device=device)
+    # acc, ce = evaluate_model(model_path, 'data/endev', 'Unsupervised Only')
+    # if acc is not None:
+    #     results['unsupervised_only'] = {'accuracy': acc, 'cross_entropy': ce,
+    #                                     'description': 'enraw only (no labels)'}
     
     # ========================================================================
     # SUMMARY AND ANALYSIS
