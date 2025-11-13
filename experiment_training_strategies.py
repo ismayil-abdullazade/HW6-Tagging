@@ -2,26 +2,48 @@
 """
 Experiment with different training strategies for semi-supervised learning.
 This script tests various ways of incorporating enraw data into HMM training.
+All paths are relative to the HW-TAG directory.
 """
 
 import subprocess
 import json
 import re
 from datetime import datetime
+import os
 
 print("="*80)
-print("TRAINING STRATEGY EXPERIMENTS")
+print("TRAINING STRATEGY EXPERIMENTS - Question 2(h) Extra Credit")
 print("Testing different ways to incorporate enraw data into HMM training")
 print("="*80)
 
 # Store all results
 results = {}
 
-def run_training(name, command, description):
+def run_training(name, train_args, model_name, description, checkpoint=None):
     """Run a training command and capture the results."""
     print(f"\n{'='*80}")
     print(f"Experiment: {name}")
     print(f"Description: {description}")
+    
+    # Build command with relative paths
+    cmd_parts = ["python", "code/tag.py", "data/endev"]
+    
+    # Add training data
+    if train_args:
+        cmd_parts.append("--train")
+        cmd_parts.extend(train_args)
+    
+    # Add model
+    cmd_parts.extend(["--model", model_name])
+    
+    # Add checkpoint if continuing training
+    if checkpoint:
+        cmd_parts.extend(["--checkpoint", checkpoint])
+    
+    # Add other options
+    cmd_parts.extend(["--max_steps", "50", "--device", "cpu"])
+    
+    command = " ".join(cmd_parts)
     print(f"Command: {command}")
     print(f"{'='*80}")
     
@@ -57,9 +79,10 @@ def run_training(name, command, description):
         
         results[name] = metrics
         print(f"\n✓ {name} completed:")
-        print(f"  Accuracy: {metrics['accuracy']}%")
-        print(f"  Known: {metrics['known_accuracy']}%, Novel: {metrics['novel_accuracy']}%")
-        print(f"  Cross-entropy: {metrics['cross_entropy']}, Perplexity: {metrics['perplexity']}")
+        if metrics['accuracy']:
+            print(f"  Accuracy: {metrics['accuracy']}%")
+            print(f"  Known: {metrics['known_accuracy']}%, Novel: {metrics['novel_accuracy']}%")
+            print(f"  Cross-entropy: {metrics['cross_entropy']}, Perplexity: {metrics['perplexity']}")
         
         return metrics
         
@@ -82,7 +105,8 @@ print("2. Semi-supervised (en_hmm_raw.pkl): 88.283% accuracy")
 # Strategy 1: Train on enraw alone (fully unsupervised)
 run_training(
     "strategy_1_unsupervised",
-    "cd /mnt/c/Users/Asus1/Downloads/HW-TAG && python code/tag.py data/endev --train data/enraw --model en_hmm_unsup.pkl --max_steps 50 --device cpu",
+    ["data/enraw"],
+    "en_hmm_unsup.pkl",
     "Fully unsupervised: Train on enraw alone (no supervised data)"
 )
 
@@ -93,72 +117,102 @@ print("This is en_hmm_raw.pkl which we already trained: 88.283% accuracy")
 print("="*80)
 
 # Strategy 3: Weighted supervised 3:1 (ensup + ensup + ensup + enraw)
-# We need to create a temporary file with ensup repeated 3 times
 print("\n" + "="*80)
 print("Strategy 3: Preparing weighted corpus (3x supervised weight)")
 print("="*80)
-subprocess.run(
-    "cd /mnt/c/Users/Asus1/Downloads/HW-TAG && cat data/ensup data/ensup data/ensup > data/ensup3x",
-    shell=True
-)
-print("✓ Created data/ensup3x (ensup repeated 3 times)")
+if not os.path.exists("data/ensup3x"):
+    subprocess.run(
+        "cat data/ensup data/ensup data/ensup > data/ensup3x",
+        shell=True
+    )
+    print("✓ Created data/ensup3x (ensup repeated 3 times)")
+else:
+    print("✓ data/ensup3x already exists")
 
 run_training(
     "strategy_3_weighted_3to1",
-    "cd /mnt/c/Users/Asus1/Downloads/HW-TAG && python code/tag.py data/endev --train data/ensup3x data/enraw --model en_hmm_weighted3.pkl --max_steps 50 --device cpu",
+    ["data/ensup3x", "data/enraw"],
+    "en_hmm_weighted3.pkl",
     "Weighted 3:1: Train on (ensup×3) + enraw to weight supervised data more heavily"
 )
 
 # Strategy 4: Weighted supervised 2:1
-subprocess.run(
-    "cd /mnt/c/Users/Asus1/Downloads/HW-TAG && cat data/ensup data/ensup > data/ensup2x",
-    shell=True
-)
-print("✓ Created data/ensup2x (ensup repeated 2 times)")
+if not os.path.exists("data/ensup2x"):
+    subprocess.run(
+        "cat data/ensup data/ensup > data/ensup2x",
+        shell=True
+    )
+    print("✓ Created data/ensup2x (ensup repeated 2 times)")
+else:
+    print("✓ data/ensup2x already exists")
 
 run_training(
     "strategy_4_weighted_2to1",
-    "cd /mnt/c/Users/Asus1/Downloads/HW-TAG && python code/tag.py data/endev --train data/ensup2x data/enraw --model en_hmm_weighted2.pkl --max_steps 50 --device cpu",
+    ["data/ensup2x", "data/enraw"],
+    "en_hmm_weighted2.pkl",
     "Weighted 2:1: Train on (ensup×2) + enraw for moderate supervised weighting"
 )
 
-# Strategy 5: Staged training - unsupervised first, then supervised fine-tuning
+# Strategy 5: Weighted supervised 5:1
+if not os.path.exists("data/ensup5x"):
+    subprocess.run(
+        "cat data/ensup data/ensup data/ensup data/ensup data/ensup > data/ensup5x",
+        shell=True
+    )
+    print("✓ Created data/ensup5x (ensup repeated 5 times)")
+else:
+    print("✓ data/ensup5x already exists")
+
+run_training(
+    "strategy_5_weighted_5to1",
+    ["data/ensup5x", "data/enraw"],
+    "en_hmm_weighted5.pkl",
+    "Weighted 5:1: Train on (ensup×5) + enraw for strong supervised weighting"
+)
+
+# Strategy 6: Staged training - unsupervised first, then supervised fine-tuning
 print("\n" + "="*80)
-print("Strategy 5: Staged training (unsupervised first, then supervised)")
+print("Strategy 6: Staged training (unsupervised first, then supervised)")
 print("="*80)
 # First train on enraw alone
 run_training(
-    "strategy_5_stage1",
-    "cd /mnt/c/Users/Asus1/Downloads/HW-TAG && python code/tag.py data/endev --train data/enraw --model en_hmm_stage5_1.pkl --max_steps 30 --device cpu",
-    "Stage 1: Pre-train on enraw (unsupervised)"
+    "strategy_6_stage1",
+    ["data/enraw"],
+    "en_hmm_stage6_1.pkl",
+    "Stage 1: Pre-train on enraw (unsupervised)",
 )
 # Then continue training on ensup
 run_training(
-    "strategy_5_stage2",
-    "cd /mnt/c/Users/Asus1/Downloads/HW-TAG && python code/tag.py data/endev --train data/ensup --model en_hmm_stage5_2.pkl --checkpoint en_hmm_stage5_1.pkl --max_steps 30 --device cpu",
-    "Stage 2: Fine-tune on ensup (supervised) starting from stage 1"
+    "strategy_6_stage2",
+    ["data/ensup"],
+    "en_hmm_stage6_2.pkl",
+    "Stage 2: Fine-tune on ensup (supervised) starting from stage 1",
+    checkpoint="en_hmm_stage6_1.pkl"
 )
 
-# Strategy 6: Staged training - supervised first, then unsupervised
+# Strategy 7: Staged training - supervised first, then unsupervised
 print("\n" + "="*80)
-print("Strategy 6: Staged training (supervised first, then unsupervised)")
+print("Strategy 7: Staged training (supervised first, then unsupervised)")
 print("="*80)
-# First train on ensup (use existing en_hmm.pkl)
-# Then continue training on enraw
+# Use existing en_hmm.pkl and continue on enraw
 run_training(
-    "strategy_6_continue",
-    "cd /mnt/c/Users/Asus1/Downloads/HW-TAG && python code/tag.py data/endev --train data/enraw --model en_hmm_stage6.pkl --checkpoint en_hmm.pkl --max_steps 30 --device cpu",
-    "Continue training on enraw starting from supervised model (en_hmm.pkl)"
+    "strategy_7_continue",
+    ["data/enraw"],
+    "en_hmm_stage7.pkl",
+    "Continue training on enraw starting from supervised model (en_hmm.pkl)",
+    checkpoint="en_hmm.pkl"
 )
 
-# Strategy 7: Staged training - supervised, then combined
+# Strategy 8: Staged training - supervised, then combined
 print("\n" + "="*80)
-print("Strategy 7: Staged training (supervised first, then combined)")
+print("Strategy 8: Staged training (supervised first, then combined)")
 print("="*80)
 run_training(
-    "strategy_7_combined",
-    "cd /mnt/c/Users/Asus1/Downloads/HW-TAG && python code/tag.py data/endev --train data/ensup data/enraw --model en_hmm_stage7.pkl --checkpoint en_hmm.pkl --max_steps 30 --device cpu",
-    "Continue training on ensup+enraw starting from supervised model"
+    "strategy_8_combined",
+    ["data/ensup", "data/enraw"],
+    "en_hmm_stage8.pkl",
+    "Continue training on ensup+enraw starting from supervised model",
+    checkpoint="en_hmm.pkl"
 )
 
 # Print summary
@@ -166,73 +220,64 @@ print("\n" + "="*80)
 print("EXPERIMENT SUMMARY")
 print("="*80)
 
-print("\n{:<35} {:>10} {:>10} {:>10} {:>12}".format(
+print("\n{:<40} {:>10} {:>10} {:>10} {:>12}".format(
     "Strategy", "Accuracy", "Known", "Novel", "Cross-ent"
 ))
-print("-" * 80)
+print("-" * 85)
 
 # Add baseline results
-print("{:<35} {:>9.3f}% {:>9.3f}% {:>9.3f}% {:>12.4f}".format(
+print("{:<40} {:>9.3f}% {:>9.3f}% {:>9.3f}% {:>12.4f}".format(
     "Baseline: Supervised only",
     90.455, 96.786, 24.858, 10.8059
 ))
-print("{:<35} {:>9.3f}% {:>9.3f}% {:>9.3f}% {:>12.4f}".format(
-    "Baseline: Semi-supervised",
+print("{:<40} {:>9.3f}% {:>9.3f}% {:>9.3f}% {:>12.4f}".format(
+    "Baseline: Semi-supervised (ensup+enraw)",
     88.283, 92.440, 26.684, 9.6054
 ))
+print("-" * 85)
 
-for name, metrics in sorted(results.items()):
-    if 'error' not in metrics and metrics['accuracy'] is not None:
-        print("{:<35} {:>9.3f}% {:>9.3f}% {:>9.3f}% {:>12.4f}".format(
-            name.replace('_', ' ').title(),
+# Print experiment results
+for name, metrics in results.items():
+    if 'error' in metrics:
+        print("{:<40} {:>10}".format(name, f"ERROR: {metrics['error']}"))
+    elif metrics.get('accuracy'):
+        print("{:<40} {:>9.3f}% {:>9.3f}% {:>9.3f}% {:>12.4f}".format(
+            name,
             metrics['accuracy'],
             metrics['known_accuracy'],
             metrics['novel_accuracy'],
             metrics['cross_entropy']
         ))
-    elif 'error' in metrics:
-        print("{:<35} {:>10}".format(
-            name.replace('_', ' ').title(),
-            f"ERROR: {metrics['error']}"
-        ))
 
 # Save detailed results to JSON
-with open('training_strategies_results.json', 'w') as f:
+output_file = f"training_strategies_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+with open(output_file, 'w') as f:
     json.dump(results, f, indent=2)
-print("\n✓ Detailed results saved to training_strategies_results.json")
+
+print(f"\n✓ Detailed results saved to: {output_file}")
 
 # Analysis and recommendations
 print("\n" + "="*80)
-print("ANALYSIS")
+print("ANALYSIS & RECOMMENDATIONS")
 print("="*80)
 
-print("""
-Expected patterns to observe:
-
-1. **Unsupervised only (Strategy 1)**: Should have VERY poor accuracy (~30-40%)
-   - Tags get repurposed arbitrarily without supervised signal
-   - Demonstrates why we need at least some labeled data
-
-2. **Weighted supervised (Strategies 3-4)**: Should improve over baseline semi-supervised
-   - More weight on supervised data reduces Merialdo effect
-   - 3:1 weighting should be better than 2:1
-   - Should recover some of the accuracy lost in semi-supervised training
-
-3. **Staged: Unsup → Sup (Strategy 5)**: Likely poor performance
-   - Starting from random/unsupervised tags makes supervised fine-tuning harder
-   - The tag meanings learned in stage 1 don't match supervised tag meanings
-
-4. **Staged: Sup → Unsup (Strategy 6)**: May cause degradation
-   - Starting from good supervised model, unsupervised data may cause drift
-   - Similar to baseline semi-supervised but possibly worse
-
-5. **Staged: Sup → Combined (Strategy 7)**: Should help
-   - Warm start from good supervised model
-   - Combined training may find better local optimum than starting from scratch
-
-Best strategy is likely: Weighted 3:1 or staged Sup → Combined
-""")
+if results:
+    # Find best strategy by accuracy
+    valid_results = {k: v for k, v in results.items() if v.get('accuracy')}
+    if valid_results:
+        best = max(valid_results.items(), key=lambda x: x[1]['accuracy'])
+        print(f"\n🏆 Best performing strategy: {best[0]}")
+        print(f"   Accuracy: {best[1]['accuracy']}%")
+        print(f"   Description: {best[1]['description']}")
+        
+        # Compare to baselines
+        if best[1]['accuracy'] > 90.455:
+            print(f"\n✨ This beats supervised-only by {best[1]['accuracy'] - 90.455:.3f}%!")
+        elif best[1]['accuracy'] > 88.283:
+            print(f"\n✓ This beats standard semi-supervised by {best[1]['accuracy'] - 88.283:.3f}%")
+        else:
+            print(f"\n⚠ This underperforms standard semi-supervised by {88.283 - best[1]['accuracy']:.3f}%")
 
 print("\n" + "="*80)
-print("EXPERIMENTS COMPLETE")
+print("Experiment complete! Run times will be logged.")
 print("="*80)
